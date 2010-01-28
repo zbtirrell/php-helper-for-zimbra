@@ -9,6 +9,7 @@
  * 1.1    30-Oct-2007  [zbt]  Added on vacation, and split admin functionality out into child class<br/>
  * 1.2    23-Oct-2008  [zbt]  Added stuff for tasks
  * 1.3    24-Oct-2008  [nrp]  Addded phpDoc goodness
+ * 1.4    02-Feb-2010  [zbt/djb/amb]  Converted email channel to Smarty, improved functions for appointment notifications, extended data in task functions
  *
  */
 
@@ -27,6 +28,7 @@ class Zimbra
 {
 	public $debug=false;
 	public $error;
+	public $error_code;
 
 	protected $_connected = false; // boolean to determine if the connect function has been called
 	protected static $_num_soap_calls = 0; // the number of times a SOAP call has been made
@@ -101,7 +103,6 @@ class Zimbra
 	* sso to Zimbra
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $options options for sso
 	* @return	boolean
 	*/
@@ -130,7 +131,6 @@ class Zimbra
 	* get the preauth key needed for single-sign on
 	*
 	* @since		version1.0
-	* @access	public
 	* @param	string $username username
 	* @return	string preauthentication key in hmacsha1 format
 	*/
@@ -152,7 +152,6 @@ class Zimbra
 	* generate an HMAC using SHA1, required for preauth
 	* 
 	* @since		version 1.0
-	* @access	public
 	* @param	int $key encryption key
 	* @param	string $data data to encrypt
 	* @return	string converted to hmac sha1 format
@@ -184,7 +183,6 @@ class Zimbra
 	* connect to the Zimbra SOAP service
 	*
 	* @since	version 1.0
-	* @access	public
 	* @return	array associative array of account information
 	*/
 	public function connect()
@@ -245,7 +243,6 @@ class Zimbra
 	* set the user you are administering (experimental)
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $username username to administer
 	* @return	boolean
 	*/
@@ -258,10 +255,12 @@ class Zimbra
 
 		$this->_username = $username;
 
-		 $body = '<DelegateAuthRequest xmlns="urn:zimbraAdmin">
-		   <account by="name">'.$this->_username.'@'.$this->_server.'</account> 
-		 </DelegateAuthRequest>';
+		$body = '<DelegateAuthRequest xmlns="urn:zimbraAdmin">
+			<account by="name">'.$this->_username.'@'.$this->_server.'</account> 
+		</DelegateAuthRequest>';
 		$response = $this->soapRequest($body,$header);
+		global $firephp;
+		$firephp->log($response);
 		if($response)
 		{
 			$tmp = $this->makeXMLTree($response);
@@ -284,7 +283,6 @@ class Zimbra
 	* generic function to get information on mailbox, preferences, attributes, properties, and more!
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $options options for info retrieval, defaults to null
 	* @return	array information
 	*/
@@ -312,9 +310,8 @@ class Zimbra
 	* get the messages in folder, deafults to inbox
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $search folder to retrieve from, defaults to in:inbox
-	* @param	array $options options to apply to retrieval
+	* @param $options options to apply to retrieval
 	* @return	array array of messages
 	*/
 	public function getMessages($search='in:inbox', $options=array('limit'=>5, 'fetch'=>'none'))
@@ -342,8 +339,7 @@ class Zimbra
 	* get appointments in a calendar
 	*
 	* @since		version 1.0
-	* @access	public
-	* @param	array $options array of options to apply to retrieval from calendar
+	* @param $options array of options to apply to retrieval from calendar
 	* @return	array associative array of appointments
 	*/
 	public function getAppointments($options=array())
@@ -367,14 +363,71 @@ class Zimbra
 
 
 	/**
+	* searchAppointment
+	*
+	* search for appointments
+	*
+	* @param	string $search item for searching
+	* @param $options special search options
+	* @return	mixed
+	*/
+	public function searchAppointments($search,$options=array())
+	{
+		$option_string = $this->buildOptionString($options);
+
+		$soap ='<SearchRequest xmlns="urn:zimbraMail" types="appointment"'.$option_string.'>
+					<query>in:"'.$search.'"</query>
+				</SearchRequest>';
+
+		$response = $this->soapRequest($soap);
+		if($response)
+		{
+			$array = $this->makeXMLTree($response);
+
+			return $array['soap:Envelope'][0]['soap:Body'][0]['SearchResponse'][0]['appt'];
+		}
+		else
+		{
+			return false;
+		}
+	} // end searchAppointments
+
+
+	/**
+	* getAppointment
+	*
+	* get appointment detail
+	*
+	* @param	int $id of appointment
+	* @return	mixed
+	*/
+	public function getAppointment($id)
+	{
+		$soap ='<GetMsgRequest xmlns="urn:zimbraMail">
+					<m id="'.$id.'" />
+				</GetMsgRequest>';
+
+		$response = $this->soapRequest($soap);
+		if($response)
+		{
+			$array = $this->makeXMLTree($response);
+			return $array['soap:Envelope'][0]['soap:Body'][0]['GetMsgResponse'][0]['m'][0];
+		}
+		else
+		{
+			return false;
+		}
+	} // end getAppointment
+
+
+	/**
 	* getTasks
 	*
 	* get tasks in a task list
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $search search paramaters, defaults to *
-	* @param	array $options options to control retrieval
+	* @param $options options to control retrieval
 	* @return	array associative array of tasks
 	*/
 	public function getTasks($search='*', $options=array('limit'=>1000))
@@ -407,6 +460,50 @@ class Zimbra
 					$task['start'] = ($task['dur'])?date('n/j/y',($task['dueDate']-$task['dur'])/1000):'[not scheduled]';
 					$task['end'] = ($task['dueDate'])?date('n/j/y',$task['dueDate']/1000):'[no date]';
 					$task['t_percent_complete'] = (int)$task['percentComplete'].'%';
+					$task['end_ts'] = strtotime($task['end']);
+
+					// begin code for gantt chart
+					global $gantt_months;
+					if(isset($gantt_months))
+					{
+						$start_ym = date('Ym',strtotime($task['start']));
+						$end_ym = date('Ym',strtotime($task['end']));
+						$this_ym = date('Ym');
+		
+						foreach($gantt_months as $k=>$month)
+						{
+							$ym = date('Ym',$month);
+		
+							$task['gantt']['month'][$k]='';
+							if($ym>$start_ym && $ym<$end_ym) // show the middle of the line portion of the graphic
+							{
+								$task['gantt']['month'][$k] = 'month-mid';
+							}
+							elseif($ym==$end_ym) // show the end of the line portion of the graphic, an arrow
+							{
+								$task['gantt']['month'][$k] = 'month-end';
+							}
+							elseif($ym==$start_ym) // show the start of the line portion of the graphic, square ended
+							{
+								$task['gantt']['month'][$k] = 'month-start';
+							}
+							else // event isn't in this month, so show nothing
+							{
+								$task['gantt']['month'][$k]='month-none';
+							}
+		
+							// highlight vertically the current month
+							if($this_ym==$ym)
+							{
+								$task['gantt']['month'][$k] .= ' month-current';
+							}
+						}
+						
+						$task['start_my'] = date('M/Y',strtotime($task['start']));
+
+					}
+					// end codes for gantt chart
+					
 					$task_list[$task['status']][] = $task;
 				}
 				else
@@ -425,7 +522,7 @@ class Zimbra
 			usort($task_list['DEFERRED'], 'zimbra_startSort');
 			usort($task_list['NEED'], 'zimbra_nameSort');
 			usort($task_list['COMP'], 'zimbra_dueSort');
-			
+
 			return $task_list;
 		}
 		else
@@ -440,7 +537,6 @@ class Zimbra
 	* get the content from a message
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	int $id id number of message to retrieve content of
 	* @return	array associative array with message content, valid for tasks, calendar entries, and email messages.
 	*/	
@@ -459,7 +555,7 @@ class Zimbra
 			$message = $temp['inv'][0]['comp'][0];
 
 			// content with no attachment
-			$message['content'] = $temp['mp'][0]['mp'][1]['content'][0];
+			$message['content'] = $message['descHtml'][0];
 			
 			// content with attachment
 			$message['content'] .= $temp['mp'][0]['mp'][0]['mp'][1]['content'][0]; 
@@ -478,7 +574,6 @@ class Zimbra
 	* get the calendars the user is subscribed to
 	*
 	* @since		version 1.0
-	* @access	public
 	* @return	array $subscribed
 	*/
 	public function getSubscribedCalendars()
@@ -502,9 +597,9 @@ class Zimbra
 	* get the task lists the user is subscribed to
 	*
 	* @since		version 1.0
-	* @access	public
-	* @return	array $subscribed or false
-	*/
+	* @access       public
+	* @return       array $subscribed or false
+	 */
 	public function getSubscribedTaskLists()
 	{
 		$subscribed = array();
@@ -518,15 +613,13 @@ class Zimbra
 		}
 		return $subscribed;
 	} // end getSubscribedCalendars
-
-
+	
 	/**
 	* getFolder
 	*
 	* get a folder (experimental)
 	*
-	* @since		version 1.0
-	* @access	public
+	* @since                version 1.0
 	* @param	string $folder_options options for folder retrieval
 	* @return	array $folder or false
 	*/
@@ -556,13 +649,9 @@ class Zimbra
 	} // end getFolder
 
 	/**
-	* getPrefrences
-	*
-	* get preferences
+	* Get preferences. Use the following format: <pre><code>&lt;GetPrefsRequest> &lt;!-- get only the specified prefs --> [&lt;pref name="{name1}"/> &lt;pref name="{name2}"/>] &lt;/GetPrefsRequest></code></pre>
 	*
 	* @since		version 1.0
-	* @access	public
-	* @example	example XML: <GetPrefsRequest> <!-- get only the specified prefs --> [<pref name="{name1}"/> <pref name="{name2}"/>] </GetPrefsRequest>
 	* @return	array $prefs or false
 	*/
 	public function getPreferences()
@@ -586,16 +675,12 @@ class Zimbra
 	} // end getPreferences
 
 	/**
-	* setPrefrences
-	*
-	* modify preferences
-	*
-	* @since		version 1.0
-	* @access	public
-	* @param	string $options options to set the prefrences
-	* @example	example XML: <ModifyPrefsRequest> [<pref name="{name}">{value}</pref>...]+ </ModifyPrefsRequest>
-	* @return	boolean
-	*/
+	 * Modify preferences. Use the following format: <pre><code>&lt;ModifyPrefsRequest> [&lt;pref name="{name}">{value}&lt;/pref>...]+ &lt;/ModifyPrefsRequest></code></pre>
+	 *
+	 * @since		version 1.0
+	 * @param	string $options options to set the preferences
+	 * @return	boolean
+	 */
 	public function setPreferences($options='')
 	{
 		$option_string = '';
@@ -619,24 +704,26 @@ class Zimbra
 	} // end setPreferences
 
 	/**
-	* emailChannel
-	*
 	* build the email channel
 	*
 	* @since		version 1.0
-	* @access	public
 	*/
 	public function emailChannel()
 	{
-		require_once 'xtemplate.php';
-		$tpl = new XTemplate('/web/pscpages/webapp/portal/channel/email/templates/index.tpl');
-
-		$tpl->parse('main.transition');
+		require_once('PSUSmarty.class.php');
+		$tpl = new PSUSmarty;
 
 		$total_messages = 0;
 		$unread_messages = 0;
 
+		$clean_messages = array();
 		$messages = $this->getMessages('in:inbox');
+
+		if( $messages === false )
+		{
+			return sprintf('Sorry, your mailbox could not be fetched (%s).', $this->error_code);
+		}
+
 		if(is_array($messages))
 		{
 			$more = $messages['more'];
@@ -667,9 +754,10 @@ class Zimbra
 					$clean_message['flagged'] = (strpos($message['f'],'f')!==false)?true:false;
 				}
 
-				$tpl->assign('message', $clean_message);
-				$tpl->parse('main.message');
+				$clean_messages[] = $clean_message;
 			}
+			$tpl->assign('messages', $clean_messages);
+
 			$inbox = $this->getFolder(array('l'=>2));
 			
 			$total_messages = (int)$inbox['n'];
@@ -695,8 +783,7 @@ class Zimbra
 			$tpl->parse('main.away_message');
 		}*/
 		
-		$tpl->parse('main');
-		$tpl->out('main');
+		return $tpl->fetch('/web/pscpages/webapp/portal/channel/email/templates/index.tpl');
 	} // end emailChannel
 	
 
@@ -707,8 +794,7 @@ class Zimbra
 	* make an option string that will be placed as attributes inside an XML tag
 	*
 	* @since		version 1.0
-	* @access	public
-	* @param	array $options array of options to be parsed into a string
+	* @param $options array of options to be parsed into a string
 	* @return	string $options_string
 	*/
 	protected function buildOptionString($options)
@@ -727,7 +813,6 @@ class Zimbra
 	* get the Auth Token out of the XML
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param string $xml xml to have the auth token pulled from
 	* @return string $auth_token
 	*/
@@ -745,7 +830,6 @@ class Zimbra
 	* get the Session ID out of the XML
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $xml xml to have the session id pulled from
 	* @return int $session_id
 	*/
@@ -763,7 +847,6 @@ class Zimbra
 	* get the error code out of the XML
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $xml xml to have the error code pulled from
 	* @return int $session_id
 	*/
@@ -782,7 +865,6 @@ class Zimbra
 	* turns byte numbers into a more readable format with KB or MB
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	int $bytes bytes to be worked with
 	* @param	boolean $redlevel
 	* @return int $size
@@ -810,7 +892,6 @@ class Zimbra
 	* if debug is on, show a message
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $message message for debug
 	*/
 	protected function message($message)
@@ -822,12 +903,136 @@ class Zimbra
 	} // end message
 
 	/**
+	* modifyAppointment
+	*
+	* modify appoint
+	*
+	* @since		version 1.0
+	* @param $appt Zimbra appt to modify
+	* @param	boolean $needexceptID for whether this modification requires one or not
+	* @return	boolean success/failure
+	*/
+	public function modifyAppointment($appt,$needexceptID=false)
+	{
+		if (is_array($appt['inv'][0]['comp'][0]['recur'])) return false;
+		$exceptIdstr = '';
+		if($needexceptID)
+		{
+			$exceptIdstr='		<exceptId
+									d="'.$appt['inv'][0]['comp'][0]['s_attribute_d'][0].'" 
+									tz="'.htmlentities($appt['inv'][0]['comp'][0]['s_attribute_tz'][0]).'"/>';
+		}
+		$soap ='
+			<ModifyAppointmentRequest id="'.$appt['id'].'" comp="0" xmlns="urn:zimbraMail">
+				<m>
+					<inv>
+						<comp 
+							fb="'.$appt['inv'][0]['comp'][0]['fb'].'" 
+							fba="'.$appt['inv'][0]['comp'][0]['fba'].'" 
+							name="'.$appt['inv'][0]['comp'][0]['name'].'" 
+							loc="'.$appt['inv'][0]['comp'][0]['loc'].'">
+								<s 
+									d="'.$appt['inv'][0]['comp'][0]['s_attribute_d'][0].'" 
+									tz="'.htmlentities($appt['inv'][0]['comp'][0]['s_attribute_tz'][0]).'"/>
+								<e 
+									d="'.$appt['inv'][0]['comp'][0]['e_attribute_d'][0].'" 
+									tz="'.htmlentities($appt['inv'][0]['comp'][0]['s_attribute_tz'][0]).'"/>
+								'.$exceptIdstr.'
+						</comp>
+					</inv>
+					<mp>
+						<content>'.$appt['inv'][0]['comp'][0]['desc'][0].'</content>
+					</mp>
+				</m>
+			</ModifyAppointmentRequest>';
+		//echo $soap;
+		//$this->debug=true;
+		$response = $this->soapRequest($soap);
+
+		if($response)
+		{
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	
+		
+	} // end modifyAppointment
+
+
+	/**
+	* createAppointmentException
+	*
+	* modify recurring appointment instance
+	*
+	* @since		version 1.0
+	* @param $appt Zimbra appt to modify
+	* @return	boolean success/failure
+	*/
+	public function CreateAppointmentException($appt)
+	{
+		if (preg_match('/T/',$appt['inv'][0]['comp'][0]['s_attribute_d'][0]))
+		{
+			$start_ts = $appt['inv'][0]['comp'][0]['s_attribute_d'][0];
+			$end_ts = $appt['inv'][0]['comp'][0]['e_attribute_d'][0];
+			$exceptid_ts = $appt['inv'][0]['comp'][0]['s_attribute_d'][0];
+		}
+		else
+		{
+			$start_ts = date('Ymd\THis',($appt['inv'][0]['comp'][0]['s_attribute_d'][0])/1000);
+			$end_ts = date('Ymd\THis',($appt['inv'][0]['comp'][0]['e_attribute_d'][0])/1000);
+			$exceptid_ts = date('Ymd\THis',($appt['inv'][0]['comp'][0]['s_attribute_d'][0])/1000);
+		}
+		$soap ='
+			<CreateAppointmentExceptionRequest id="'.$appt['id'].'" comp="0" xmlns="urn:zimbraMail">
+				<m>
+					<inv>
+						<comp 
+							fb="'.$appt['inv'][0]['comp'][0]['fb'].'" 
+							fba="'.$appt['inv'][0]['comp'][0]['fba'].'" 
+							name="'.$appt['inv'][0]['comp'][0]['name'].'" 
+							loc="'.$appt['inv'][0]['comp'][0]['loc'].'">
+								<s 
+									d="'.$start_ts.'" 
+									tz="'.htmlentities($appt['inv'][0]['comp'][0]['s_attribute_tz'][0]).'"/>
+								<e 
+									d="'.$end_ts.'" 
+									tz="'.htmlentities($appt['inv'][0]['comp'][0]['s_attribute_tz'][0]).'"/>
+								<exceptId
+									d="'.$exceptid_ts.'" 
+									tz="'.htmlentities($appt['inv'][0]['comp'][0]['s_attribute_tz'][0]).'"/>
+						</comp>
+
+					</inv>
+					<mp>
+						<content>'.$appt['inv'][0]['comp'][0]['desc'][0].'</content>
+					</mp>
+				</m>
+			</CreateAppointmentExceptionRequest>';
+		//echo $soap;
+		//$this->debug=true;
+		$response = $this->soapRequest($soap);
+		if($response)
+		{
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	
+		
+	} // end createAppointmentException
+
+
+	/**
 	* soapRequest
 	*
 	* make a SOAP request to Zimbra server, returns the XML
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $body body of page
 	* @param	boolean $header
 	* @param	boolean $footer
@@ -835,6 +1040,8 @@ class Zimbra
 	*/
 	protected function soapRequest($body, $header=false,$connecting=false)
 	{
+		$this->error = $this->error_code = null;
+
 		if(!$connecting && !$this->_connected)
 		{
 			throw new Exception('zimbra.class: soapRequest called without a connection to Zimbra server');
@@ -843,32 +1050,36 @@ class Zimbra
 		if($header==false)
 		{
 			$header = '<context xmlns="urn:zimbra">
-							<authToken>'.$this->auth_token.'</authToken>
-							<sessionId id="'.$this->session_id.'">'.$this->session_id.'</sessionId>
-						</context>';
+	<authToken>'.$this->auth_token.'</authToken>
+	<sessionId id="'.$this->session_id.'">'.$this->session_id.'</sessionId>
+</context>';
 		}
 
 		$soap_message = '<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
-							<soap:Header>'.$header.'</soap:Header>
-							<soap:Body>'.$body.'</soap:Body>
-						</soap:Envelope>';
-		$this->message('SOAP message:<textarea>'.$soap_message.'</textarea>');
+	<soap:Header>'.$header.'</soap:Header>
+	<soap:Body>'.$body.'</soap:Body>
+</soap:Envelope>';
+		$this->message( sprintf('%s SOAP message: %s', get_class($this), PSU::xmlpp($soap_message, true)) );
 		
 		curl_setopt($this->_curl, CURLOPT_POSTFIELDS, $soap_message);
         
 		if(!($response = curl_exec($this->_curl)))
-        {
-			$this->error = 'ERROR: curl_exec - ('.curl_errno($this->_curl).') '.curl_error($this->_curl);
-			return false;
-        }
-		elseif(strpos($response,'<soap:Body><soap:Fault>')!==false)
 		{
-			$error_code = $this->extractErrorCode($response);
-			$this->error = 'ERROR: '.$error_code.':<textarea>'.$response.'</textarea>';
-			$this->message($this->error);
+			$this->error = sprintf('%s ERROR: curl_exec - (%s) %s', get_class($this), curl_errno($this->_curl), curl_error($this->_curl));
+			if( $this->debug ) echo '<hr>';
 			return false;
 		}
-		$this->message('SOAP response:<textarea>'.$response.'</textarea><br/><br/>');
+		elseif(strpos($response,'<soap:Body><soap:Fault>')!==false)
+		{
+			$this->error_code = $this->extractErrorCode($response);
+			$this->error = sprintf('%s ERROR: %s: %s', get_class($this), $this->error_code, PSU::xmlpp($response, true));
+			$this->message($this->error);
+			if( $this->debug ) echo '<hr>';
+			return false;
+		}
+		$this->message( sprintf('%s SOAP response: %s', get_class($this), PSU::xmlpp($response, true)) );
+
+		if( $this->debug ) echo '<hr>';
 		
 		$this->_num_soap_calls++;
 		return $response;
@@ -880,7 +1091,6 @@ class Zimbra
 	* get the number of SOAP calls that have been made.  This is for debugging and performancing
 	*
 	* @since		version 1.0
-	* @access	public
 	* @return int $this->_num_soap_calls
 	*/
 	public function getNumSOAPCalls()
@@ -894,7 +1104,6 @@ class Zimbra
 	* turns XML into an array
 	*
 	* @since		version 1.0
-	* @access	public
 	* @param	string $data data to be built into an array
 	* @return 	array $ret
 	*/
@@ -951,15 +1160,12 @@ class Zimbra
 	} // end makeXMLTree
 
 	/**
-	* &composeArray
-	*
 	* function used exclusively by makeXMLTree to help turn XML into an array
 	*
 	* @since		version 1.0
-	* @access	public
-	* @param	array $array
-	* @param	array $elements
-	* @param	array $value
+	* @param $array
+	* @param $elements
+	* @param $value
 	* @return	array $array
 	*/
 	private function &composeArray($array, $elements, $value=array())
@@ -988,7 +1194,6 @@ class Zimbra
 	* keeps users session alive
 	*
 	* @since		version 1.0
-	* @access	public
 	* @return	string xml response from the noop
 	*/	
 	public function noop()
@@ -1009,9 +1214,8 @@ class Zimbra
 * sort of zimbra elements
 *
 * @since		version 1.0
-* @access	public
-* @param	array $task_a
-* @param	array $task_b
+* @param $task_a
+* @param $task_b
 * @return	int (($task_a['dueDate']-$task_a['dur']) < ($task_b['dueDate']-$task_b['dur'])) ? -1 : 1
 */	
 function zimbra_startSort($task_a, $task_b)
@@ -1027,9 +1231,8 @@ function zimbra_startSort($task_a, $task_b)
 * sort by dueDate
 *
 * @since		version 1.0
-* @access	public
-* @param	array $task_a
-* @param	array $task_b
+* @param $task_a
+* @param $task_b
 * @return	int ($task_a['dueDate'] < $task_b['dueDate']) ? -1 : 1
 */	
 
@@ -1046,9 +1249,8 @@ function zimbra_dueSort($task_a, $task_b)
 * sort by name
 *
 * @since		version 1.0
-* @access	public
-* @param	array $task_a
-* @param	array $task_b
+* @param $task_a
+* @param $task_b
 * @return	int ($task_a['name'] < $task_b['name']) ? -1 : 1
 */	
 
